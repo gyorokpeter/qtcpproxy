@@ -20,9 +20,11 @@ S command_tcpConnect;
 S command_tcpSend;
 S command_tcpClose;
 S command_tcpListen;
+S command_udpListen;
+S command_udpSend;
 bool kdbConnActive;
 
-enum ProxySocketMode {PROXY_DATA, PROXY_LISTENING};
+enum ProxySocketMode {PROXY_DATA, PROXY_LISTENING, PROXY_UDP};
 
 vector<WSAPOLLFD> handlesForPoll;
 vector<ProxySocketMode> handleMode;
@@ -132,7 +134,7 @@ void processCommand(S cmd, K kobj) {
         }
         sockaddr_in addr;
         addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+        addr.sin_addr.s_addr = INADDR_ANY;
         addr.sin_port = htons(k2int(port));
         int bindResult = bind(handle, (sockaddr *)&addr, sizeof(addr));
         if (0 != bindResult) {
@@ -171,6 +173,65 @@ void processCommand(S cmd, K kobj) {
         closesocket(handle);
         if (debug) cout << ".tcp.close: handle closed " << handle << endl;
         socketDisconnected(handle);
+    } else if (cmd == command_udpListen) {
+        if (kobj->n < 3) { cerr << ".udp.listen: too few args" << endl; return; }
+        K alias = kK(kobj)[1];
+        K port = kK(kobj)[2];
+        if (! (alias->t == -11 || alias->t == 10)) {cerr << ".udp.listen: wrong type for alias" << endl; return;}
+        if (! (port->t == -6 || port->t == -7)) {cerr << ".udp.listen: wrong type for port" << endl; return;}
+        string aliasstr = k2str(alias);
+        int handle = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        int iOptval = 1;
+        int iResult = setsockopt(handle, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                         (char *) &iOptval, sizeof (iOptval));
+        if (iResult == SOCKET_ERROR) {
+            cerr << "in setsockopt: " << niceWSAGetLastError() << endl;
+        }
+        sockaddr_in addr;
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(k2int(port));
+        int bindResult = bind(handle, (sockaddr *)&addr, sizeof(addr));
+        if (0 != bindResult) {
+            string msg = niceWSAGetLastError();
+            k(-kdbhandle, (char*)".udp.listenFailed", kp((char*)aliasstr.c_str()), kp((char*)msg.c_str()), K(0));
+            closesocket(handle);
+            //cerr << ".udp.listen: " << niceWSAGetLastError() << endl;
+        } else {
+            k(-kdbhandle, (char*)".udp.listenSuccess", kp((char*)aliasstr.c_str()), ki(handle), K(0));
+            if (debug) cout << ".udp.listen: handle=" << handle << endl;
+            placeHandle(handle, PROXY_UDP);
+        }
+    } else if (cmd == command_udpSend) {
+        if (kobj->n < 5) { cerr << ".tcp.send: too few args" << endl; return; }
+        K handlek = kK(kobj)[1];
+        K host = kK(kobj)[2];
+        K port = kK(kobj)[3];
+        K data = kK(kobj)[4];
+        if (! (handlek->t == -6 || handlek->t == -7)) {cerr << ".udp.send: wrong type for handle" << endl; return;}
+        if (! (host->t == -11 || host->t == 10)) {cerr << ".udp.send: wrong type for host" << endl; return;}
+        if (! (port->t == -6 || port->t == -7)) {cerr << ".udp.send: wrong type for port" << endl; return;}
+        if (data->t != 4) {cerr << ".send.send: wrong type for data" << endl; return;}
+        int handle = k2int(handlek);
+        string hoststr = host->t == -11?string(host->s):string((char*)kC(host),host->n);
+        hostent* hostResolved = gethostbyname(hoststr.c_str());
+        if (hostResolved == 0) {
+            string msg = niceWSAGetLastError();
+            k(-kdbhandle, (char*)".udp.sendFailed", kp((char*)hoststr.c_str()), kp((char*)msg.c_str()), K(0));
+            return;
+        }
+        char *ip = inet_ntoa (*(struct in_addr *)*hostResolved->h_addr_list);
+        sockaddr_in addr;
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = inet_addr(ip);
+        addr.sin_port = htons(port->t == -6?port->i:port->j);
+
+        int result = sendto(handle, (S)kG(data), data->n, 0, (sockaddr *)&addr, sizeof(addr));
+        if (result < 0) {
+            string msg = niceWSAGetLastError();
+            cerr << ".udp.send: " << msg << endl;
+            k(-kdbhandle, (char*)".udp.sendFailed", ki(handle), kp((char*)msg.c_str()), K(0));
+        }
     } else {
         cerr << "unknown command: " << cmd << endl;
     }
@@ -234,6 +295,22 @@ void receiveMsg(int handle, ProxySocketMode mode) {
                 }
                 break;
             }
+            case PROXY_UDP:{
+                sockaddr_in addr;
+                int addrsize = sizeof(addr);
+                const int bufferSize = 65536;
+                char buffer[bufferSize];
+                int res = recvfrom(handle, buffer, bufferSize, 0, (sockaddr *) &addr, &addrsize);
+                if (SOCKET_ERROR == res) {
+                    cerr << ".udp.accept: " << niceWSAGetLastError() << endl;
+                } else {
+                    K msg = ktn(4, res);
+                    memcpy(kG(msg),buffer, res);
+                    if (debug) cout << ".udp.receive: handle " << handle << " length " << res << endl;
+                    k(-kdbhandle, (char*)".udp.receive", ki(handle), ki(ntohl(addr.sin_addr.s_addr)), ki(ntohs(addr.sin_port)), msg, K(0));
+                }
+                break;
+            }
             }
         }
     }
@@ -242,7 +319,6 @@ void receiveMsg(int handle, ProxySocketMode mode) {
 char username[] = "";
 
 int main(int argc, char *argv[]) {
-    if (debug) cout << "a " << _WIN32_WINNT << endl;
     if (argc < 3) {
         cerr << "usage: $0 host port" << endl;
         return 1;
@@ -260,6 +336,8 @@ int main(int argc, char *argv[]) {
     command_tcpSend = ss(S(".tcp.send"));
     command_tcpClose = ss(S(".tcp.close"));
     command_tcpListen = ss(S(".tcp.listen"));
+    command_udpListen = ss(S(".udp.listen"));
+    command_udpSend = ss(S(".udp.send"));
     K r = k(-kdbhandle,(char*)".tcp.proxy", ki(0), (K)0);
     if (debug) cout << int(r->t) << endl;
     while(kdbConnActive) {

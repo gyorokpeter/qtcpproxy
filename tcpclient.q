@@ -92,6 +92,38 @@ if[0=system"p"; system"p 0W"];
 //API
 .tcp.exit:{hclose abs .tcp.handle};
 
+//API
+.udp.listen:{[alias;port]
+    .tcp.handle(`.udp.listen;alias;port);
+    .tcp.handle(::);
+    };
+
+//callback
+.udp.listenFailed:{[alias;msg]
+    -1".udp.connFailed: ",alias," - ",msg;
+    };
+
+//callback
+.udp.listenSuccess:{[alias;handle]
+    -1".udp.listenSuccess: ",alias," - ",string handle;
+    };
+
+//callback
+.udp.receive:{[handle;host;port;msg]
+    -1".udp.receive: h ",string[handle]," host ",("."sv string`int$0x00 vs host)," port ",string[port]," msg=",.Q.s1 msg;
+    };
+
+//API
+.udp.send:{[handle;host;port;msg]
+    .tcp.handle(`.udp.send;handle;host;port;msg);
+    .tcp.handle(::);
+    };
+
+//callback
+.udp.sendFailed:{[handle;msg]
+    -1".udp.sendFailed: ",string[handle]," - ",msg;
+    };
+
 //.tcp.handle(`.tcp.connect;"indexHandle";"index.hu";80)
 //.tcp.handle(`.tcp.send;indexHandle;`byte$"\r\n"sv("GET / HTTP/1.1";"Host: index.hu";"Connection: close";"";""))
 //.tcp.handle(`.tcp.close;indexHandle)
