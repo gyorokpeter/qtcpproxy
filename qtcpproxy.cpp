@@ -29,6 +29,8 @@ enum ProxySocketMode {PROXY_DATA, PROXY_LISTENING, PROXY_UDP};
 vector<WSAPOLLFD> handlesForPoll;
 vector<ProxySocketMode> handleMode;
 
+vector<pair<int, ProxySocketMode> > pendingHandles;
+
 template<class ... Ts>
 string cat(Ts ... args) {
     ostringstream os;
@@ -65,6 +67,10 @@ void socketDisconnected(int handle) {
             if (rec.fd == handle) rec.fd = -1;
         }
     }
+}
+
+void queueHandleToPlace(unsigned handle, ProxySocketMode mode) {
+    pendingHandles.push_back({handle, mode});
 }
 
 void placeHandle(unsigned handle, ProxySocketMode mode) {
@@ -116,7 +122,7 @@ void processCommand(S cmd, K kobj) {
         } else {
             k(-kdbhandle, (char*)".tcp.connSuccess", kp((char*)aliasstr.c_str()), ki(handle), K(0));
             if (debug) cout << ".tcp.connect: handle=" << handle << endl;
-            placeHandle(handle, PROXY_DATA);
+            queueHandleToPlace(handle, PROXY_DATA);
         }
     } else if (cmd == command_tcpListen) {
         if (kobj->n < 3) { cerr << ".tcp.listen: too few args" << endl; return; }
@@ -151,7 +157,7 @@ void processCommand(S cmd, K kobj) {
             } else {
                 k(-kdbhandle, (char*)".tcp.listenSuccess", kp((char*)aliasstr.c_str()), ki(handle), K(0));
                 if (debug) cout << ".tcp.listen: handle=" << handle << endl;
-                placeHandle(handle, PROXY_LISTENING);
+                queueHandleToPlace(handle, PROXY_LISTENING);
             }
         }
     } else if (cmd == command_tcpSend) {
@@ -200,7 +206,7 @@ void processCommand(S cmd, K kobj) {
         } else {
             k(-kdbhandle, (char*)".udp.listenSuccess", kp((char*)aliasstr.c_str()), ki(handle), K(0));
             if (debug) cout << ".udp.listen: handle=" << handle << endl;
-            placeHandle(handle, PROXY_UDP);
+            queueHandleToPlace(handle, PROXY_UDP);
         }
     } else if (cmd == command_udpSend) {
         if (kobj->n < 5) { cerr << ".tcp.send: too few args" << endl; return; }
@@ -290,7 +296,7 @@ void receiveMsg(int handle, ProxySocketMode mode) {
                 if (INVALID_SOCKET == acceptResult) {
                     cerr << ".tcp.accept: " << niceWSAGetLastError() << endl;
                 } else {
-                    placeHandle(acceptResult, PROXY_DATA);
+                    queueHandleToPlace(acceptResult, PROXY_DATA);
                     k(-kdbhandle, (char*)".tcp.clientConnect", ki(handle), ki(acceptResult), ki(ntohl(addr.sin_addr.s_addr)), K(0));
                 }
                 break;
@@ -346,7 +352,7 @@ int main(int argc, char *argv[]) {
                                                handlesForPoll.size(),
                                                30000
                                                )))
-            { cerr << "socket error" << endl; }
+            { cerr << "WSAPoll: " << niceWSAGetLastError() << endl; }
         if (debug) cout << "epoll finished" << endl;
         for (size_t i = 0; i<handlesForPoll.size(); ++i) {
             WSAPOLLFD item = handlesForPoll[i];
@@ -359,7 +365,17 @@ int main(int argc, char *argv[]) {
                     if (debug) cout << "handle " << item.fd << " has POLLHUP" << endl;
                     socketDisconnected(item.fd);
                 }
+                if (item.revents & POLLNVAL) {
+                    if (debug) cout << "handle " << item.fd << " has POLLNVAL" << endl;
+                    socketDisconnected(item.fd);
+                }
             }
+        }
+        if(0<pendingHandles.size()) {
+            for (auto it : pendingHandles) {
+                placeHandle(it.first, it.second);
+            }
+            pendingHandles.clear();
         }
     }
     kclose(kdbhandle);

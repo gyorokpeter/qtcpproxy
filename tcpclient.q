@@ -85,7 +85,6 @@ if[0=system"p"; system"p 0W"];
 //API
 .tcp.start:{
     path:"/"sv -1_"/"vs ssr[;"\\";"/"]first -3#value .z.s;
-    //system"start /B ",path,"/qtcpproxy.exe localhost ",string system"p";
     system"start ",path,"/qtcpproxy.exe localhost ",string system"p";
     };
 
