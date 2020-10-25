@@ -16,6 +16,12 @@ if[0=system"p"; system"p 0W"];
     };
 
 //API
+.tcp.setDebug:{[val]
+    .tcp.handle(`.tcp.setDebug;val);
+    .tcp.handle(::);
+    };
+
+//API
 .tcp.connect:{[alias;host;port]
     .tcp.handle(`.tcp.connect;alias;host;port);
     .tcp.handle(::);

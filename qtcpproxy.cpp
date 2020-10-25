@@ -13,7 +13,7 @@
 
 using namespace std;
 
-const bool debug = false;
+bool debug = false;
 
 int kdbhandle = 0;
 S command_tcpConnect;
@@ -22,6 +22,7 @@ S command_tcpClose;
 S command_tcpListen;
 S command_udpListen;
 S command_udpSend;
+S command_setDebug;
 bool kdbConnActive;
 
 enum ProxySocketMode {PROXY_DATA, PROXY_LISTENING, PROXY_UDP};
@@ -238,6 +239,12 @@ void processCommand(S cmd, K kobj) {
             cerr << ".udp.send: " << msg << endl;
             k(-kdbhandle, (char*)".udp.sendFailed", ki(handle), kp((char*)msg.c_str()), K(0));
         }
+    } else if (cmd == command_setDebug) {
+        if (kobj->n < 2) { cerr << ".tcp.setDebug: too few args" << endl; return; }
+        K par = kK(kobj)[1];
+        if (par->t != -1) {cerr << ".tcp.setDebug: wrong type for value" << endl; return;}
+        debug = par->g;
+        cout << "debug: " << debug << endl;
     } else {
         cerr << "unknown command: " << cmd << endl;
     }
@@ -344,6 +351,7 @@ int main(int argc, char *argv[]) {
     command_tcpListen = ss(S(".tcp.listen"));
     command_udpListen = ss(S(".udp.listen"));
     command_udpSend = ss(S(".udp.send"));
+    command_setDebug = ss(S(".tcp.setDebug"));
     K r = k(-kdbhandle,(char*)".tcp.proxy", ki(0), (K)0);
     if (debug) cout << int(r->t) << endl;
     while(kdbConnActive) {
