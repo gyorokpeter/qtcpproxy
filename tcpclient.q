@@ -79,7 +79,7 @@ if[0=system"p"; system"p 0W"];
 
 //callback
 .tcp.clientConnect:{[listenHandle;handle;address]
-    -1".tcp.clientConnect: ph ",string[listenHandle]," h ",string[handle]," host ",string .Q.host address;
+    -1".tcp.clientConnect: ph ",string[listenHandle]," h ",string[handle]," host ",address;
     };
 
 //API

@@ -2,6 +2,7 @@
 #define _WIN32_WINNT Windows7
 #define WINVER Windows7
 #include <winsock2.h>
+#include <Ws2tcpip.h>
 #include <windows.h>
 #include <stdio.h>
 //#include <string>
@@ -101,21 +102,19 @@ void processCommand(S cmd, K kobj) {
         if (! (port->t == -6 || port->t == -7)) {cerr << ".tcp.connect: wrong type for port" << endl; return;}
         string aliasstr = k2str(alias);
         string hoststr = host->t == -11?string(host->s):string((char*)kC(host),host->n);
-        hostent* hostResolved = gethostbyname(hoststr.c_str());
-        if (hostResolved == 0) {
+        string portstr = to_string(port->t == -6?port->i:port->j);
+        int handle = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+        int ipv6only = 0;
+        int iResult = setsockopt(handle, IPPROTO_IPV6, IPV6_V6ONLY, (char*)&ipv6only, sizeof(ipv6only));
+        if (iResult == SOCKET_ERROR){
             string msg = niceWSAGetLastError();
             k(-kdbhandle, (char*)".tcp.connFailed", kp((char*)aliasstr.c_str()), kp((char*)msg.c_str()), K(0));
-            //cerr << ".tcp.connect: " << msg << endl;
+            closesocket(handle);
             return;
         }
-        char *ip = inet_ntoa (*(struct in_addr *)*hostResolved->h_addr_list);
-        int handle = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        sockaddr_in addr;
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = inet_addr(ip);
-        addr.sin_port = htons(port->t == -6?port->i:port->j);
-        int connectResult = connect(handle, (sockaddr *)&addr, sizeof(addr));
-        if (0 != connectResult) {
+        timeval timeout = { 60, 0 };
+        bool connectResult = WSAConnectByName(handle, &hoststr[0], &portstr[0], 0, nullptr, 0, nullptr, &timeout, nullptr);
+        if (!connectResult) {
             string msg = niceWSAGetLastError();
             k(-kdbhandle, (char*)".tcp.connFailed", kp((char*)aliasstr.c_str()), kp((char*)msg.c_str()), K(0));
             closesocket(handle);
@@ -132,35 +131,57 @@ void processCommand(S cmd, K kobj) {
         if (! (alias->t == -11 || alias->t == 10)) {cerr << ".tcp.listen: wrong type for alias" << endl; return;}
         if (! (port->t == -6 || port->t == -7)) {cerr << ".tcp.listen: wrong type for port" << endl; return;}
         string aliasstr = k2str(alias);
-        int handle = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        int iOptval = 1;
-        int iResult = setsockopt(handle, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
-                         (char *) &iOptval, sizeof (iOptval));
-        if (iResult == SOCKET_ERROR) {
-            cerr << "in setsockopt: " << niceWSAGetLastError() << endl;
-        }
-        sockaddr_in addr;
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = INADDR_ANY;
-        addr.sin_port = htons(k2int(port));
-        int bindResult = bind(handle, (sockaddr *)&addr, sizeof(addr));
-        if (0 != bindResult) {
+        string portstr = to_string(port->t == -6?port->i:port->j);
+
+        int iResult;
+        ADDRINFO Hints, *AddrInfo;
+        memset(&Hints, 0, sizeof (Hints));
+        Hints.ai_family = PF_UNSPEC;
+        Hints.ai_socktype = SOCK_STREAM;
+        Hints.ai_flags = AI_NUMERICHOST | AI_PASSIVE;
+        char *Address = nullptr;
+        iResult = getaddrinfo(Address, &portstr[0], &Hints, &AddrInfo);
+        if (iResult != 0) {
             string msg = niceWSAGetLastError();
-            k(-kdbhandle, (char*)".tcp.listenFailed", kp((char*)aliasstr.c_str()), kp((char*)msg.c_str()), K(0));
-            closesocket(handle);
-            //cerr << ".tcp.listen: " << niceWSAGetLastError() << endl;
-        } else {
-            int listenResult = listen(handle, SOMAXCONN);
-            if (0 != listenResult) {
-                string msg = niceWSAGetLastError();
-                k(-kdbhandle, (char*)".tcp.listenFailed", kp((char*)aliasstr.c_str()), kp((char*)msg.c_str()), K(0));
-                closesocket(handle);
-            } else {
-                k(-kdbhandle, (char*)".tcp.listenSuccess", kp((char*)aliasstr.c_str()), ki(handle), K(0));
-                if (debug) cout << ".tcp.listen: handle=" << handle << endl;
-                queueHandleToPlace(handle, PROXY_LISTENING);
-            }
+            k(-kdbhandle, (char*)".tcp.connFailed", kp((char*)aliasstr.c_str()), kp((char*)msg.c_str()), K(0));
+            return;
         }
+        int succ = 0;
+        for (ADDRINFO *AI = AddrInfo; AI != NULL; AI = AI->ai_next) {
+            if ((AI->ai_family != PF_INET) && (AI->ai_family != PF_INET6))
+                continue;
+            int handle = socket(AI->ai_family, AI->ai_socktype, AI->ai_protocol);
+            if (handle == INVALID_SOCKET) {
+                cerr << "socket() failed with error: " << niceWSAGetLastError() << endl;
+                continue;
+            }
+            int iOptval = 1;
+            int iResult = setsockopt(handle, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                             (char *) &iOptval, sizeof (iOptval));
+            if (iResult == SOCKET_ERROR) {
+                cerr << "in setsockopt: " << niceWSAGetLastError() << endl;
+            }
+            if (bind(handle, AI->ai_addr, int(AI->ai_addrlen)) == SOCKET_ERROR) {
+                cerr << "bind() failed with error: " << niceWSAGetLastError() << endl;
+                closesocket(handle);
+                continue;
+            }
+            if (listen(handle, SOMAXCONN) == SOCKET_ERROR) {
+                cerr << "listen() failed with error: " << niceWSAGetLastError() << endl;
+                closesocket(handle);
+                continue;
+            }
+            ++succ;
+            if (debug) cout << ".tcp.listen: handle=" << handle << " protocol=" << ((AI->ai_family == PF_INET) ? "PF_INET" : "PF_INET6") << endl;
+            queueHandleToPlace(handle, PROXY_LISTENING);
+            k(-kdbhandle, (char*)".tcp.listenSuccess", kp((char*)aliasstr.c_str()), ki(handle), K(0));
+        }
+        freeaddrinfo(AddrInfo);
+        if(0==succ) {
+            std::string msg = "no sockets successfully listening";
+            k(-kdbhandle, (char*)".tcp.listenFailed", kp((char*)aliasstr.c_str()), kp((char*)msg.c_str()), K(0));
+        }
+
     } else if (cmd == command_tcpSend) {
         if (kobj->n < 3) { cerr << ".tcp.send: too few args" << endl; return; }
         K handlek = kK(kobj)[1];
@@ -258,7 +279,7 @@ void receiveMsg(int handle, ProxySocketMode mode) {
             kdbConnActive = false;
             return;
         }
-        else { 
+        else {
             if (debug) cout << "type: " << int(r->t) << endl;
             if (r->t == 0) {
                 if (debug) cout << "item count: " << r->n << endl;
@@ -297,14 +318,18 @@ void receiveMsg(int handle, ProxySocketMode mode) {
                 break;
             }
             case PROXY_LISTENING:{
-                sockaddr_in addr;
-                int addrsize = sizeof(addr);
-                int acceptResult = accept(handle, (sockaddr*)&addr, &addrsize);
-                if (INVALID_SOCKET == acceptResult) {
+                SOCKET ConnSock;
+                SOCKADDR_STORAGE From;
+                int FromLen = sizeof(From);
+                ConnSock = accept(handle, (LPSOCKADDR) &From, &FromLen);
+                if (ConnSock == INVALID_SOCKET) {
                     cerr << ".tcp.accept: " << niceWSAGetLastError() << endl;
                 } else {
-                    queueHandleToPlace(acceptResult, PROXY_DATA);
-                    k(-kdbhandle, (char*)".tcp.clientConnect", ki(handle), ki(acceptResult), ki(ntohl(addr.sin_addr.s_addr)), K(0));
+                    char Hostname[NI_MAXHOST] = "<unknown>";
+                    getnameinfo((LPSOCKADDR) &From, FromLen, Hostname,
+                            sizeof(Hostname), NULL, 0, NI_NUMERICHOST);
+                    k(-kdbhandle, (char*)".tcp.clientConnect", ki(handle), ki(ConnSock), kp(Hostname), K(0));
+                    queueHandleToPlace(ConnSock, PROXY_DATA);
                 }
                 break;
             }
